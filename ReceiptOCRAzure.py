@@ -54,7 +54,7 @@ def _format_tax_details(receipt: AnalyzeResult):
 def _format_type(receipt_type: DocumentField):
     if receipt_type:
         type_value = getattr(receipt_type, "value_string", None)
-        logger.debug("Receipt type value:", type_value)
+        #logger.debug("Receipt type value:", type_value)
         if type_value and type_value.strip():
             type_map = {
                 "Transportation.Parking": "Parken",
@@ -143,8 +143,8 @@ async def process_image(image_file: UploadFile):
 
     if receipts.documents:
         for idx, receipt in enumerate(receipts.documents):
-            logger.debug(f"--------Analysis of receipt #{idx + 1}--------")
-            logger.debug(f"Receipt type: {receipt.doc_type if receipt.doc_type else 'N/A'}")
+            #logger.debug(f"--------Analysis of receipt #{idx + 1}--------")
+            #logger.debug(f"Receipt type: {receipt.doc_type if receipt.doc_type else 'N/A'}")
             if receipt.fields:
                 subtotal = receipt.fields.get("Subtotal")
                 receipt_type = receipt.fields.get("ReceiptType")
