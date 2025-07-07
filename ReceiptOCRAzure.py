@@ -14,6 +14,7 @@ from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 
 
@@ -39,7 +40,7 @@ def _format_tax_details(receipt: AnalyzeResult):
             tax_currency = getattr(tax_field, "value_currency", None) if tax_field else None
             tax_amount = getattr(tax_currency, "amount", None) if tax_currency else None
 
-            logger.debug(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
+            logger.info(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
             tax_list.append({
                 "Rate": rate * 100 if rate else None,
                 "Netto": net_amount,
@@ -54,7 +55,7 @@ def _format_tax_details(receipt: AnalyzeResult):
 def _format_type(receipt_type: DocumentField):
     if receipt_type:
         type_value = getattr(receipt_type, "value_string", None)
-        #logger.debug("Receipt type value:", type_value)
+        # logger.debug("Receipt type value:", type_value)
         # if type_value and type_value.strip():
         #     type_map = {
         #         "Transportation.Parking": "Parken",
@@ -63,7 +64,7 @@ def _format_type(receipt_type: DocumentField):
         #         "Hotel": "Hotel",
         #         "Meal": "Essen/Restaurant",
         #     }
-        return type_value #type_map.get(type_value, type_value)
+        return type_value  # type_map.get(type_value, type_value)
 
 
 def _format_UID_number(UID_number: DocumentField):
@@ -89,6 +90,7 @@ def get_random_image(path="images"):
 
     return os.path.join(path, random_file)
 
+
 def compute_average_confidence(receipt) -> float:
     if not receipt.fields:
         return 0.0
@@ -103,18 +105,40 @@ def compute_average_confidence(receipt) -> float:
         return 0.0
 
     return round(sum(confidences) / len(confidences), 4)
+
+
 def _format_price(price_dict):
     if price_dict is None:
         return "N/A"
     return "".join([f"{p}" for p in price_dict.values()])
 
 
+os.makedirs("logs", exist_ok=True)
 app = FastAPI()
 load_dotenv()
 endpoint = os.getenv("DOCUMENTINTELLIGENCE_ENDPOINT")
 key = os.getenv("DOCUMENTINTELLIGENCE_API_KEY")
-logger = logging.getLogger("uvicorn.error")
+
+file_handler = RotatingFileHandler(
+    filename="logs/ocr_api.log",
+    mode="a",
+    maxBytes=1024*1024,   # 5MB
+    backupCount=3,
+    encoding="utf-8"
+)
+console_handler = logging.StreamHandler()
+# Formatter
+formatter = logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+)
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+# Root logger
+logger = logging.getLogger("ocr_logger")
 logger.setLevel(logging.DEBUG)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
 if not endpoint or not key:
     raise RuntimeError("Azure Document Intelligence credentials not found in environment variables.")
 document_intelligence_client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
@@ -123,16 +147,16 @@ document_intelligence_client = DocumentIntelligenceClient(endpoint=endpoint, cre
 @app.post("/process_image")
 async def process_image(image_file: UploadFile):
     if not (image_file.content_type.startswith('image/') or image_file.content_type.startswith('application/pdf')):
+        logger.error(f"Invalid file type")
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
     if image_file.content_type.startswith('image/'):
         try:
             contents = await image_file.read()
-            logger.debug('here 1')
             image_bytes = io.BytesIO(contents)
 
             img = Image.open(image_bytes)
             img.load()  # safer than .verify()
-            logger.debug('Image loaded successfully')
+            logger.info(f'Image {image_file.filename} loaded successfully')
 
         except Exception as e:
             logger.error(f"Image load failed: {e}")
@@ -140,8 +164,6 @@ async def process_image(image_file: UploadFile):
     else:
         try:
             contents = await image_file.read()
-            logger.debug('here 2')
-            # For PDF files, we assume the content is already in bytes
             if not contents:
                 raise HTTPException(status_code=400, detail="Empty PDF file.")
         except Exception as e:
@@ -149,21 +171,16 @@ async def process_image(image_file: UploadFile):
             raise HTTPException(status_code=400, detail=f"Invalid PDF: {str(e)}")
 
     poller = document_intelligence_client.begin_analyze_document("prebuilt-receipt", body=io.BytesIO(contents),
-                                                                 locale="de",
-                                                                 features=[DocumentAnalysisFeature.QUERY_FIELDS],
-                                                                 query_fields=["UID"], )
+                                                                 locale="de")
     receipts: AnalyzeResult = poller.result()
 
     if receipts.documents:
         for idx, receipt in enumerate(receipts.documents):
-            #logger.debug(f"--------Analysis of receipt #{idx + 1}--------")
-            #logger.debug(f"Receipt type: {receipt.doc_type if receipt.doc_type else 'N/A'}")
+            logger.info(f"--------Analysis of receipt #{image_file.filename}--------")
             if receipt.fields:
                 subtotal = receipt.fields.get("Subtotal")
                 receipt_type = receipt.fields.get("ReceiptType")
                 country_obj = receipt.fields.get("CountryRegion")
-                logger.debug(f"country_obj: {country_obj}")
-                logger.debug(f"country_value: {getattr(country_obj, 'valueCountryRegion', None) if country_obj else None}")
                 date_obj = receipt.fields.get("TransactionDate")
                 time_obj = receipt.fields.get("TransactionTime")
                 date_value = getattr(date_obj, "value_date", None) if date_obj else None
@@ -174,7 +191,6 @@ async def process_image(image_file: UploadFile):
                 total_obj = receipt.fields.get("Total")
                 total_currency = getattr(total_obj, "value_currency", None) if total_obj else None
                 total_amount = getattr(total_currency, "amount", None)  # Ensure total has value_currency
-                UID_number = receipt.fields.get("UID")
                 output = {
                     "Filename": image_file.filename if image_file else None,  # TODO
                     "Confidence": compute_average_confidence(receipt),
@@ -183,9 +199,9 @@ async def process_image(image_file: UploadFile):
                     "Time": time_value.strftime("%H:%M:%S") if date_value else None,
                     "Type": _format_type(receipt_type),
                     "BruttoTotal": total_amount,
-                    #"UID-number": _format_UID_number(UID_number),  # Placeholder — replace with regex if needed
                     "Tip": safe_get(receipt, "Tip").value_currency.amount if safe_get(receipt, "Tip") else None,
                     "Taxes": tax_details
                 }
+                logger.info(f"Receipt processed: {output}")
                 json_str = json.dumps(output, indent=2, ensure_ascii=False)
                 return JSONResponse(content=output)
