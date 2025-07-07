@@ -55,15 +55,15 @@ def _format_type(receipt_type: DocumentField):
     if receipt_type:
         type_value = getattr(receipt_type, "value_string", None)
         #logger.debug("Receipt type value:", type_value)
-        if type_value and type_value.strip():
-            type_map = {
-                "Transportation.Parking": "Parken",
-                "Transportation.Taxi": "Taxi",
-                "Supplies": "Einkauf/Material",
-                "Hotel": "Hotel",
-                "Meal": "Essen/Restaurant",
-            }
-            return type_map.get(type_value, "Unknown type")
+        # if type_value and type_value.strip():
+        #     type_map = {
+        #         "Transportation.Parking": "Parken",
+        #         "Transportation.Taxi": "Taxi",
+        #         "Supplies": "Einkauf/Material",
+        #         "Hotel": "Hotel",
+        #         "Meal": "Essen/Restaurant",
+        #     }
+        return type_value #type_map.get(type_value, type_value)
 
 
 def _format_UID_number(UID_number: DocumentField):
@@ -89,7 +89,20 @@ def get_random_image(path="images"):
 
     return os.path.join(path, random_file)
 
+def compute_average_confidence(receipt) -> float:
+    if not receipt.fields:
+        return 0.0
 
+    confidences = [
+        field.confidence
+        for field in receipt.fields.values()
+        if field.confidence is not None
+    ]
+
+    if not confidences:
+        return 0.0
+
+    return round(sum(confidences) / len(confidences), 4)
 def _format_price(price_dict):
     if price_dict is None:
         return "N/A"
@@ -148,8 +161,14 @@ async def process_image(image_file: UploadFile):
             if receipt.fields:
                 subtotal = receipt.fields.get("Subtotal")
                 receipt_type = receipt.fields.get("ReceiptType")
+                country_obj = receipt.fields.get("CountryRegion")
+                logger.debug(f"country_obj: {country_obj}")
+                logger.debug(f"country_value: {getattr(country_obj, 'valueCountryRegion', None) if country_obj else None}")
                 date_obj = receipt.fields.get("TransactionDate")
+                time_obj = receipt.fields.get("TransactionTime")
                 date_value = getattr(date_obj, "value_date", None) if date_obj else None
+                time_value = getattr(time_obj, "value_time", None) if time_obj else None
+                country_value = getattr(country_obj, "value_country_region", None) if country_obj else None
                 tax_details = _format_tax_details(receipt)
                 tip = receipt.fields.get("Tip")
                 total_obj = receipt.fields.get("Total")
@@ -157,11 +176,14 @@ async def process_image(image_file: UploadFile):
                 total_amount = getattr(total_currency, "amount", None)  # Ensure total has value_currency
                 UID_number = receipt.fields.get("UID")
                 output = {
-                    "filename": image_file.filename if image_file else None,  # TODO
+                    "Filename": image_file.filename if image_file else None,  # TODO
+                    "Confidence": compute_average_confidence(receipt),
+                    "Country": country_value,
                     "Date": date_value.strftime("%d-%m-%Y") if date_value else None,
+                    "Time": time_value.strftime("%H:%M:%S") if date_value else None,
                     "Type": _format_type(receipt_type),
                     "BruttoTotal": total_amount,
-                    "UID-number": _format_UID_number(UID_number),  # Placeholder — replace with regex if needed
+                    #"UID-number": _format_UID_number(UID_number),  # Placeholder — replace with regex if needed
                     "Tip": safe_get(receipt, "Tip").value_currency.amount if safe_get(receipt, "Tip") else None,
                     "Taxes": tax_details
                 }
