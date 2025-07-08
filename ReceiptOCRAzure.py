@@ -41,8 +41,10 @@ def _format_tax_details(receipt: AnalyzeResult):
             tax_amount = getattr(tax_currency, "amount", None) if tax_currency else None
 
             logger.info(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
-
-            if rate:
+            if rate is not None:
+                if tax_amount is None:
+                    logger.warning(f"Tax amount is None for tax rate {rate}. Calculating tax amount based on net amount.")
+                    tax_amount = net_amount * rate if net_amount is not None else None
                 rate *= 100
                 brutto_amount = round(net_amount + tax_amount, 2) if net_amount is not None and tax_amount is not None else None
             else:
@@ -100,13 +102,8 @@ def compute_average_confidence(receipt) -> float:
     return round(sum(confidences) / len(confidences), 4)
 
 
-def _format_price(price_dict):
-    if price_dict is None:
-        return "N/A"
-    return "".join([f"{p}" for p in price_dict.values()])
-
-
 os.makedirs("logs", exist_ok=True)
+CONFIDENCE_THRESHOLD = 0.5
 app = FastAPI()
 load_dotenv()
 endpoint = os.getenv("DOCUMENTINTELLIGENCE_ENDPOINT")
@@ -180,14 +177,14 @@ async def process_image(image_file: UploadFile):
                 time_obj = receipt.fields.get("TransactionTime")
                 date_value = getattr(date_obj, "value_date", None) if date_obj else None
 
-                if(date_value is None):
-                    logger.warning("Date is missing, checking for ArrivalDate.")
-                    arrival_date_obj = receipt.fields.get("ArrivalDate")
-                    arrival_date_value = arrival_date_obj.value_date if arrival_date_obj else None
-                    if arrival_date_obj and arrival_date_value:
-                        logger.warning(f"Using ArrivalDate instead: {arrival_date_value}")
-                        warnings = [{"code": "WARN_Date", "message": "Using ArrivalDate as TransactionDate."}]
-                        date_value = arrival_date_value
+                if date_value is None:
+                    logger.warning("Date is missing, checking for DepartureDate.")
+                    departure_date_obj = receipt.fields.get("DepartureDate")
+                    departure_date_value = departure_date_obj.value_date if departure_date_obj else None
+                    if departure_date_obj and departure_date_value:
+                        logger.warning(f"Using DepartureDate instead: {departure_date_value}")
+                        warnings = [{"code": "WARN_Date", "message": "Using DepartureDate as TransactionDate."}]
+                        date_value = departure_date_value
 
                 date_confidence = date_obj.confidence if date_obj else None
                 time_value = getattr(time_obj, "value_time", None) if time_obj else None
@@ -212,17 +209,17 @@ async def process_image(image_file: UploadFile):
                 if warnings:
                     output = {"Warnings": warnings, **output}
 
-                if average_confidence < 0.5:
+                if average_confidence < CONFIDENCE_THRESHOLD:
                     validation_errors = [{"code": "ERR_low_avg_confidence", "message": "Average confidence is too low ({average_confidence:.2f} < 0.5)."}]
-                elif total_amount is None:
+                if total_amount is None:
                     validation_errors.append({"code": "ERR_no_brutto", "message": "BruttoTotal is missing."})
-                elif total_confidence < 0.5:
+                if total_confidence < CONFIDENCE_THRESHOLD:
                     validation_errors = [{"code": "ERR_low_brutto_confidence",
-                                          "message": "Brutto confidence is too low ({average_confidence:.2f} < 0.5)."}]
+                                          "message": f"Brutto confidence is too low ({average_confidence:.2f} < 0.5)."}]
                 # Check Date
                 if date_value is None:
                     validation_errors.append({"code": "ERR_no_date", "message": "Date is missing."})
-                elif date_confidence and date_confidence < 0.5:
+                if date_confidence and date_confidence < CONFIDENCE_THRESHOLD:
                     validation_errors.append({"code": "ERR_low_date_confidence", "message": f"Date confidence is too low ({date_confidence:.2f} < 0.5)."})
                 if validation_errors:
                     logger.error(f"Validation errors for receipt {image_file.filename}: {validation_errors}")
