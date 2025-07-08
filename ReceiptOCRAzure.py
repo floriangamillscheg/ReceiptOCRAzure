@@ -77,20 +77,6 @@ def _format_UID_number(UID_number: DocumentField):
             return "UID format invalid"
     return "UID not found"
 
-
-def get_random_image(path="images"):
-    # List all files (filtering out hidden files and directories)
-    files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)) and not f.startswith(".")]
-
-    if not files:
-        raise FileNotFoundError("No files found in the directory.")
-
-    # Pick a random file
-    random_file = random.choice(files)
-
-    return os.path.join(path, random_file)
-
-
 def compute_average_confidence(receipt) -> float:
     if not receipt.fields:
         return 0.0
@@ -176,24 +162,27 @@ async def process_image(image_file: UploadFile):
 
     if receipts.documents:
         for idx, receipt in enumerate(receipts.documents):
+            logger.debug(f"Number of receipts: {len(receipts.documents)}")
             logger.info(f"--------Analysis of receipt #{image_file.filename}--------")
             if receipt.fields:
-                subtotal = receipt.fields.get("Subtotal")
+                validation_errors = []
                 receipt_type = receipt.fields.get("ReceiptType")
                 country_obj = receipt.fields.get("CountryRegion")
                 date_obj = receipt.fields.get("TransactionDate")
                 time_obj = receipt.fields.get("TransactionTime")
                 date_value = getattr(date_obj, "value_date", None) if date_obj else None
+                date_confidence = date_obj.confidence if date_obj else 0.0
                 time_value = getattr(time_obj, "value_time", None) if time_obj else None
                 country_value = getattr(country_obj, "value_country_region", None) if country_obj else None
                 tax_details = _format_tax_details(receipt)
-                tip = receipt.fields.get("Tip")
                 total_obj = receipt.fields.get("Total")
                 total_currency = getattr(total_obj, "value_currency", None) if total_obj else None
                 total_amount = getattr(total_currency, "amount", None)  # Ensure total has value_currency
+                total_confidence = total_obj.confidence if total_obj else None
+                average_confidence = compute_average_confidence(receipt)
                 output = {
                     "Filename": image_file.filename if image_file else None,  # TODO
-                    "Confidence": compute_average_confidence(receipt),
+                    "Confidence": average_confidence,
                     "Country": country_value,
                     "Date": date_value.strftime("%d-%m-%Y") if date_value else None,
                     "Time": time_value.strftime("%H:%M:%S") if date_value else None,
@@ -202,6 +191,19 @@ async def process_image(image_file: UploadFile):
                     "Tip": safe_get(receipt, "Tip").value_currency.amount if safe_get(receipt, "Tip") else None,
                     "Taxes": tax_details
                 }
+                if average_confidence < 0.5:
+                    validation_errors = [f"Average confidence is too low ({average_confidence:.2f} < 0.5)."]
+                elif total_amount is None:
+                    validation_errors.append("BruttoTotal is missing.")
+                elif total_confidence < 0.5:
+                    validation_errors.append(f"BruttoTotal confidence is too low ({total_confidence:.2f} < 0.5).")
+                # Check Date
+                if date_value is None:
+                    validation_errors.append("Date is missing.")
+                elif date_confidence < 0.5:
+                    validation_errors.append(f"Date confidence is too low ({date_confidence:.2f} < 0.5).")
+                if validation_errors:
+                    logger.error(f"Validation errors for receipt {image_file.filename}: {validation_errors}")
+                    raise HTTPException(status_code=400, detail=f"Validation errors: {', '.join(validation_errors)}")
                 logger.info(f"Receipt processed: {output}")
-                json_str = json.dumps(output, indent=2, ensure_ascii=False)
                 return JSONResponse(content=output)
