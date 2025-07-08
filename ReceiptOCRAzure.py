@@ -204,6 +204,13 @@ async def process_image(image_file: UploadFile):
                     validation_errors.append(f"Date confidence is too low ({date_confidence:.2f} < 0.5).")
                 if validation_errors:
                     logger.error(f"Validation errors for receipt {image_file.filename}: {validation_errors}")
-                    raise HTTPException(status_code=400, detail=f"Validation errors: {', '.join(validation_errors)}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "message": f"Validation failed for receipt {image_file.filename}.",
+                            "errors": validation_errors,
+                            "partial_output": output
+                        }
+                    )
                 logger.info(f"Receipt processed: {output}")
                 return JSONResponse(content=output)
