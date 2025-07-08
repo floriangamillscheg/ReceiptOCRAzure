@@ -22,31 +22,38 @@ def safe_get(receipt: AnalyzeResult, field_name: str):
     return receipt.fields.get(field_name) if field_name in receipt.fields else None
 
 
-def _format_tax_details(receipt: AnalyzeResult):
+def _format_tax_details(receipt: AnalyzeResult, country_code="AT"):
     tax_details = safe_get(receipt, "TaxDetails")
     tax_info = {}
     tax_list = []
     if tax_details:
         for idx, tax_detail in enumerate(tax_details.value_array):
+            logger.info(f"tax_detail: {tax_detail}")
             tax_obj = tax_detail.value_object
-            rate_field = tax_obj.get("Rate")
+            if tax_obj is None:
+                continue
+            rate_field = tax_obj.get("Rate") if tax_obj else None
             rate = getattr(rate_field, "value_number", None) if rate_field else None
 
-            net_field = tax_obj.get("NetAmount")
+            net_field = tax_obj.get("NetAmount") if tax_obj else None
             net_currency = getattr(net_field, "value_currency", None) if net_field else None
             net_amount = getattr(net_currency, "amount", None) if net_currency else None
 
-            tax_field = tax_obj.get("Amount")
+            tax_field = tax_obj.get("Amount") if tax_obj else None
             tax_currency = getattr(tax_field, "value_currency", None) if tax_field else None
+            logger.info(f"tax_currency: {tax_obj}")
             tax_amount = getattr(tax_currency, "amount", None) if tax_currency else None
 
             logger.info(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
+
             if rate is not None:
                 if tax_amount is None:
-                    logger.warning(f"Tax amount is None for tax rate {rate}. Calculating tax amount based on net amount.")
+                    logger.warning(
+                        f"Tax amount is None for tax rate {rate}. Calculating tax amount based on net amount.")
                     tax_amount = net_amount * rate if net_amount is not None else None
                 rate *= 100
-                brutto_amount = round(net_amount + tax_amount, 2) if net_amount is not None and tax_amount is not None else None
+                brutto_amount = round(net_amount + tax_amount,
+                                      2) if net_amount is not None and tax_amount is not None else None
             else:
                 rate = 0
                 brutto_amount = net_amount
@@ -55,9 +62,10 @@ def _format_tax_details(receipt: AnalyzeResult):
                 "Netto": net_amount,
                 "TaxAmount": tax_amount,
                 "Brutto": brutto_amount,
-                "Currency": getattr(tax_currency, "currency_code", None) if tax_currency else None
             })
-        return tax_list
+        if country_code == "DE" and rate not in (0.19, 0.07):
+            return "AT", tax_list
+        return country_code, tax_list
     return None
 
 
@@ -86,6 +94,7 @@ def _format_UID_number(UID_number: DocumentField):
             return "UID format invalid"
     return "UID not found"
 
+
 def compute_average_confidence(receipt) -> float:
     if not receipt.fields:
         return 0.0
@@ -112,7 +121,7 @@ key = os.getenv("DOCUMENTINTELLIGENCE_API_KEY")
 file_handler = RotatingFileHandler(
     filename="logs/ocr_api.log",
     mode="a",
-    maxBytes=1024*1024,   # 5MB
+    maxBytes=1024 * 1024,  # 5MB
     backupCount=3,
     encoding="utf-8"
 )
@@ -138,7 +147,8 @@ document_intelligence_client = DocumentIntelligenceClient(endpoint=endpoint, cre
 async def process_image(image_file: UploadFile):
     if not (image_file.content_type.startswith('image/') or image_file.content_type.startswith('application/pdf')):
         logger.error(f"Invalid file type")
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
+        raise HTTPException(status_code=400, detail={"code": "ERR_invalid_type", "message": "Invalid file type. Please "
+                                                                                            "upload an image."})
     if image_file.content_type.startswith('image/'):
         try:
             contents = await image_file.read()
@@ -150,15 +160,16 @@ async def process_image(image_file: UploadFile):
 
         except Exception as e:
             logger.error(f"Image load failed: {e}")
-            raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+            raise HTTPException(status_code=400,
+                                detail={"code": "ERR_invalid_image", "message": f"Invalid image: {str(e)}"})
     else:
         try:
             contents = await image_file.read()
             if not contents:
-                raise HTTPException(status_code=400, detail="Empty PDF file.")
+                raise HTTPException(status_code=400, detail={"code": "ERR_empty_PDF", "message": "Empty PDF file."})
         except Exception as e:
             logger.error(f"PDF load failed: {e}")
-            raise HTTPException(status_code=400, detail=f"Invalid PDF: {str(e)}")
+            raise HTTPException(status_code=400, detail={"code": "ERR_invalid_PDF", "message": {str(e)}})
 
     poller = document_intelligence_client.begin_analyze_document("prebuilt-receipt", body=io.BytesIO(contents),
                                                                  locale="de")
@@ -189,20 +200,24 @@ async def process_image(image_file: UploadFile):
                 date_confidence = date_obj.confidence if date_obj else None
                 time_value = getattr(time_obj, "value_time", None) if time_obj else None
                 country_value = getattr(country_obj, "value_country_region", None) if country_obj else None
-                tax_details = _format_tax_details(receipt)
+                country_value, tax_details = _format_tax_details(receipt, country_value)
+
                 total_obj = receipt.fields.get("Total")
-                total_currency = getattr(total_obj, "value_currency", None) if total_obj else None
-                total_amount = getattr(total_currency, "amount", None)  # Ensure total has value_currency
+                total_value_currency = getattr(total_obj, "value_currency", None) if total_obj else None
+                total_amount = getattr(total_value_currency, "amount", None)  # Ensure total has value_currency
+                total_currency = getattr(total_value_currency, "currency_code", None) if total_value_currency else None
                 total_confidence = total_obj.confidence if total_obj else None
+
                 average_confidence = compute_average_confidence(receipt)
                 output = {
-                    "Filename": image_file.filename if image_file else None,  # TODO
+                    "Filename": image_file.filename if image_file else None,
                     "Confidence": average_confidence,
                     "Country": country_value,
                     "Date": date_value.strftime("%d-%m-%Y") if date_value else None,
                     "Time": time_value.strftime("%H:%M:%S") if time_value else None,
                     "Type": _format_type(receipt_type),
                     "BruttoTotal": total_amount,
+                    "Currency": total_currency,
                     "Tip": safe_get(receipt, "Tip").value_currency.amount if safe_get(receipt, "Tip") else None,
                     "Taxes": tax_details
                 }
@@ -210,7 +225,8 @@ async def process_image(image_file: UploadFile):
                     output = {"Warnings": warnings, **output}
 
                 if average_confidence < CONFIDENCE_THRESHOLD:
-                    validation_errors = [{"code": "ERR_low_avg_confidence", "message": "Average confidence is too low ({average_confidence:.2f} < 0.5)."}]
+                    validation_errors = [{"code": "ERR_low_avg_confidence",
+                                          "message": "Average confidence is too low ({average_confidence:.2f} < 0.5)."}]
                 if total_amount is None:
                     validation_errors.append({"code": "ERR_no_brutto", "message": "BruttoTotal is missing."})
                 if total_confidence < CONFIDENCE_THRESHOLD:
@@ -220,7 +236,8 @@ async def process_image(image_file: UploadFile):
                 if date_value is None:
                     validation_errors.append({"code": "ERR_no_date", "message": "Date is missing."})
                 if date_confidence and date_confidence < CONFIDENCE_THRESHOLD:
-                    validation_errors.append({"code": "ERR_low_date_confidence", "message": f"Date confidence is too low ({date_confidence:.2f} < 0.5)."})
+                    validation_errors.append({"code": "ERR_low_date_confidence",
+                                              "message": f"Date confidence is too low ({date_confidence:.2f} < 0.5)."})
                 if validation_errors:
                     logger.error(f"Validation errors for receipt {image_file.filename}: {validation_errors}")
                     raise HTTPException(
