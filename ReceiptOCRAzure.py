@@ -42,7 +42,7 @@ def _format_tax_details(receipt: AnalyzeResult):
 
             logger.info(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
             tax_list.append({
-                "Rate": rate * 100 if rate else None,
+                "Rate": rate * 100 if rate else 0,
                 "Netto": net_amount,
                 "TaxAmount": tax_amount,
                 "Brutto": round(net_amount + tax_amount, 2) if net_amount and tax_amount else None,
@@ -200,6 +200,13 @@ async def process_image(image_file: UploadFile):
                 # Check Date
                 if date_value is None:
                     validation_errors.append("Date is missing.")
+                    logger.warning("Date is missing, checking for ArrivalDate.")
+                    arrival_date_obj = receipt.fields.get("ArrivalDate")
+                    arrival_date_value = arrival_date_obj.value_date if arrival_date_obj else None
+                    if arrival_date_obj and arrival_date_value:
+                        logger.warning(f"Using ArrivalDate instead: {arrival_date_value}")
+                        validation_errors.append("Using ArrivalDate instead.")
+                        output["Date"] = arrival_date_value.strftime("%d-%m-%Y") if arrival_date_value else None
                 elif date_confidence < 0.5:
                     validation_errors.append(f"Date confidence is too low ({date_confidence:.2f} < 0.5).")
                 if validation_errors:
