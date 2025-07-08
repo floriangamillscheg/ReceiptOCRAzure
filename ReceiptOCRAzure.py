@@ -41,15 +41,22 @@ def _format_tax_details(receipt: AnalyzeResult):
             tax_amount = getattr(tax_currency, "amount", None) if tax_currency else None
 
             logger.info(f"Tax Rate: {rate}%, Net Amount: {net_amount}, Tax Amount: {tax_amount}")
+
+            if rate:
+                rate *= 100
+                brutto_amount = round(net_amount + tax_amount, 2) if net_amount is not None and tax_amount is not None else None
+            else:
+                rate = 0
+                brutto_amount = net_amount
             tax_list.append({
-                "Rate": rate * 100 if rate else 0,
+                "Rate": rate,
                 "Netto": net_amount,
                 "TaxAmount": tax_amount,
-                "Brutto": round(net_amount + tax_amount, 2) if net_amount and tax_amount else None,
+                "Brutto": brutto_amount,
                 "Currency": getattr(tax_currency, "currency_code", None) if tax_currency else None
             })
         return tax_list
-    return "No tax information found"
+    return None
 
 
 def _format_type(receipt_type: DocumentField):
@@ -166,12 +173,23 @@ async def process_image(image_file: UploadFile):
             logger.info(f"--------Analysis of receipt #{image_file.filename}--------")
             if receipt.fields:
                 validation_errors = []
+                warnings = []
                 receipt_type = receipt.fields.get("ReceiptType")
                 country_obj = receipt.fields.get("CountryRegion")
                 date_obj = receipt.fields.get("TransactionDate")
                 time_obj = receipt.fields.get("TransactionTime")
                 date_value = getattr(date_obj, "value_date", None) if date_obj else None
-                date_confidence = date_obj.confidence if date_obj else 0.0
+
+                if(date_value is None):
+                    logger.warning("Date is missing, checking for ArrivalDate.")
+                    arrival_date_obj = receipt.fields.get("ArrivalDate")
+                    arrival_date_value = arrival_date_obj.value_date if arrival_date_obj else None
+                    if arrival_date_obj and arrival_date_value:
+                        logger.warning(f"Using ArrivalDate instead: {arrival_date_value}")
+                        warnings = [{"code": "WARN_Date", "message": "Using ArrivalDate as TransactionDate."}]
+                        date_value = arrival_date_value
+
+                date_confidence = date_obj.confidence if date_obj else None
                 time_value = getattr(time_obj, "value_time", None) if time_obj else None
                 country_value = getattr(country_obj, "value_country_region", None) if country_obj else None
                 tax_details = _format_tax_details(receipt)
@@ -185,30 +203,27 @@ async def process_image(image_file: UploadFile):
                     "Confidence": average_confidence,
                     "Country": country_value,
                     "Date": date_value.strftime("%d-%m-%Y") if date_value else None,
-                    "Time": time_value.strftime("%H:%M:%S") if date_value else None,
+                    "Time": time_value.strftime("%H:%M:%S") if time_value else None,
                     "Type": _format_type(receipt_type),
                     "BruttoTotal": total_amount,
                     "Tip": safe_get(receipt, "Tip").value_currency.amount if safe_get(receipt, "Tip") else None,
                     "Taxes": tax_details
                 }
+                if warnings:
+                    output = {"Warnings": warnings, **output}
+
                 if average_confidence < 0.5:
-                    validation_errors = [f"Average confidence is too low ({average_confidence:.2f} < 0.5)."]
+                    validation_errors = [{"code": "ERR_low_avg_confidence", "message": "Average confidence is too low ({average_confidence:.2f} < 0.5)."}]
                 elif total_amount is None:
-                    validation_errors.append("BruttoTotal is missing.")
+                    validation_errors.append({"code": "ERR_no_brutto", "message": "BruttoTotal is missing."})
                 elif total_confidence < 0.5:
-                    validation_errors.append(f"BruttoTotal confidence is too low ({total_confidence:.2f} < 0.5).")
+                    validation_errors = [{"code": "ERR_low_brutto_confidence",
+                                          "message": "Brutto confidence is too low ({average_confidence:.2f} < 0.5)."}]
                 # Check Date
                 if date_value is None:
-                    validation_errors.append("Date is missing.")
-                    logger.warning("Date is missing, checking for ArrivalDate.")
-                    arrival_date_obj = receipt.fields.get("ArrivalDate")
-                    arrival_date_value = arrival_date_obj.value_date if arrival_date_obj else None
-                    if arrival_date_obj and arrival_date_value:
-                        logger.warning(f"Using ArrivalDate instead: {arrival_date_value}")
-                        validation_errors.append("Using ArrivalDate instead.")
-                        output["Date"] = arrival_date_value.strftime("%d-%m-%Y") if arrival_date_value else None
-                elif date_confidence < 0.5:
-                    validation_errors.append(f"Date confidence is too low ({date_confidence:.2f} < 0.5).")
+                    validation_errors.append({"code": "ERR_no_date", "message": "Date is missing."})
+                elif date_confidence and date_confidence < 0.5:
+                    validation_errors.append({"code": "ERR_low_date_confidence", "message": f"Date confidence is too low ({date_confidence:.2f} < 0.5)."})
                 if validation_errors:
                     logger.error(f"Validation errors for receipt {image_file.filename}: {validation_errors}")
                     raise HTTPException(
